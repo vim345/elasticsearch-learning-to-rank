@@ -31,6 +31,8 @@ import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.search.ConstantScoreScorer;
 import org.apache.lucene.search.ConstantScoreWeight;
+import org.apache.lucene.search.DisiPriorityQueue;
+import org.apache.lucene.search.DisiWrapper;
 import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.search.Explanation;
 import org.apache.lucene.search.IndexSearcher;
@@ -252,7 +254,7 @@ public class RankerQuery extends Query {
         @SuppressWarnings("unchecked")
         public RankerScorer scorer(LeafReaderContext context) throws IOException {
             List<Scorer> scorers = new ArrayList<>(weights.size());
-            List<DocIdSetIterator> subIterators = new ArrayList<>(weights.size());
+            DisiPriorityQueue disiPriorityQueue = new DisiPriorityQueue(weights.size());
             MutableSupplier<LtrRanker.FeatureVector> vectorSupplier = new MutableSupplier<>();
             for (int idx = 0; idx < weights.size(); idx++) {
                 Scorer scorer;
@@ -270,10 +272,11 @@ public class RankerQuery extends Query {
                     scorer = new NoopScorer(this, DocIdSetIterator.empty());
                 }
                 scorers.add(scorer);
-                subIterators.add(scorer.iterator());
+                disiPriorityQueue.add(new DisiWrapper(scorer));
             }
 
-            NaiveDisjunctionDISI rankerIterator = new NaiveDisjunctionDISI(DocIdSetIterator.all(context.reader().maxDoc()), subIterators);
+            DisjunctionDISI rankerIterator = new DisjunctionDISI(
+                    DocIdSetIterator.all(context.reader().maxDoc()), disiPriorityQueue);
             return new RankerScorer(scorers, rankerIterator, vectorSupplier);
         }
 
@@ -283,10 +286,10 @@ public class RankerQuery extends Query {
              * to be useful for logging
              */
             private final List<Scorer> scorers;
-            private final NaiveDisjunctionDISI iterator;
+            private final DisjunctionDISI iterator;
             private final MutableSupplier<LtrRanker.FeatureVector> featureVector;
 
-            RankerScorer(List<Scorer> scorers, NaiveDisjunctionDISI iterator, MutableSupplier<LtrRanker.FeatureVector> featureVector) {
+            RankerScorer(List<Scorer> scorers, DisjunctionDISI iterator, MutableSupplier<LtrRanker.FeatureVector> featureVector) {
                 super(RankerWeight.this);
                 this.scorers = scorers;
                 this.iterator = iterator;
@@ -336,15 +339,14 @@ public class RankerQuery extends Query {
      * Mostly needed to avoid calling {@link Scorer#iterator()} to directly advance
      * from {@link RankerWeight.RankerScorer#score()} as some Scorer implementations
      * will instantiate new objects every time iterator() is called.
-     * NOTE: consider using {@link org.apache.lucene.search.DisiPriorityQueue}?
      */
-    static class NaiveDisjunctionDISI extends DocIdSetIterator {
+    static class DisjunctionDISI extends DocIdSetIterator {
         private final DocIdSetIterator main;
-        private final List<DocIdSetIterator> subIterators;
+        private final DisiPriorityQueue subIteratorsPriorityQueue;
 
-        NaiveDisjunctionDISI(DocIdSetIterator main, List<DocIdSetIterator> subIterators) {
+        DisjunctionDISI(DocIdSetIterator main, DisiPriorityQueue subIteratorsPriorityQueue) {
             this.main = main;
-            this.subIterators = subIterators;
+            this.subIteratorsPriorityQueue = subIteratorsPriorityQueue;
         }
 
         @Override
@@ -370,11 +372,10 @@ public class RankerQuery extends Query {
             if (target == NO_MORE_DOCS) {
                 return;
             }
-            for (DocIdSetIterator iterator : subIterators) {
-                // FIXME: Probably inefficient
-                if (iterator.docID() < target) {
-                    iterator.advance(target);
-                }
+            DisiWrapper top = subIteratorsPriorityQueue.top();
+            while (top.doc < target) {
+                top.doc = top.iterator.advance(target);
+                top = subIteratorsPriorityQueue.updateTop();
             }
         }
 
