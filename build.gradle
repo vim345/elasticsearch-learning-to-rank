@@ -11,7 +11,7 @@ buildscript {
 }
 
 group = 'com.o19s'
-version = '1.1.0-es6.3.1'
+version = '1.1.1-es6.3.1'
 
 apply plugin: 'java'
 apply plugin: 'idea'
